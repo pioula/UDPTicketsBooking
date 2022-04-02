@@ -7,7 +7,6 @@
 #include <unistd.h>
 #include <stdint.h>
 #include <assert.h>
-
 #include "err.h"
 
 #define BUFFER_SIZE 65507
@@ -35,7 +34,7 @@ char input_buffer[BUFFER_SIZE];
 
 
 typedef struct Event {
-    unsigned short line_length;
+    uint8_t line_length;
     char description[FILE_LINE_LENGTH];
     uint16_t tickets;
 } event_t;
@@ -191,9 +190,9 @@ int count_lines(char* path) {
     return lines_count;
 }
 
-void load_events(event_t *events, int n, char* file_path) {
+void load_events(event_t *events, uint32_t n, char* file_path) {
     FILE* f = open_file(file_path);
-    for (int i = 0; i < n; i++) {
+    for (uint32_t i = 0; i < n; i++) {
         unsigned short it = 0;
 
         for (char c = (char)fgetc(f); c != EOF && c != '\n'; c = (char)fgetc(f))
@@ -215,7 +214,49 @@ uint8_t read_message_id(char* string) {
     return 0;
 }
 
-void handle_next_request(int socket_fd) {
+uint8_t count_digits(uint16_t number) {
+    int counter = 0;
+    do {
+        counter++;
+        number /= 10;
+    } while (number > 0);
+
+    return counter;
+}
+
+void send_events(int socket_fd,
+                 struct sockaddr_in client_address,
+                 event_t* events,
+                 uint32_t number_of_events) {
+    char* new_event = malloc(sizeof(char) * 2 * FILE_LINE_LENGTH);
+    if (!new_event) fatal(MALLOC_ERROR);
+    memset(shared_buffer, 0, sizeof(shared_buffer));
+    int number_of_bytes = 0;
+
+    for (uint32_t i = 0; i < number_of_events; i++) {
+        memset(new_event, 0, strlen(new_event));
+        uint8_t new_event_length = sprintf(new_event, "%u ", EVENTS);
+        new_event_length = sprintf(new_event + new_event_length, "%hu ",
+                                   events[i].tickets);
+        new_event_length = sprintf(new_event + new_event_length, "%hhu ",
+                                   events[i].line_length);
+        new_event_length = sprintf(new_event + new_event_length, "%s\n",
+                                   events[i].description);
+
+        if (new_event_length + number_of_bytes > BUFFER_SIZE)
+            break;
+
+        memcpy(&shared_buffer[number_of_bytes], new_event, new_event_length);
+        number_of_bytes += new_event_length;
+    }
+
+    send_message(socket_fd, &client_address,
+                 shared_buffer, strlen(shared_buffer));
+    free(new_event);
+}
+
+void handle_next_request(int socket_fd, event_t* events,
+                         uint32_t number_of_events) {
     struct sockaddr_in client_address;
     size_t read_length = read_message(socket_fd,
                                &client_address,
@@ -229,7 +270,7 @@ void handle_next_request(int socket_fd) {
     message_id = read_message_id(input_buffer);
     switch (message_id) {
         case GET_EVENTS:
-
+            send_events(socket_fd, client_address, events, number_of_events);
             break;
         case GET_RESERVATION:
             break;
@@ -249,7 +290,7 @@ int main(int argc, char *argv[]) {
     uint16_t port = get_port(argv, argc);
     uint32_t timeout = get_timeout(argv, argc);
 
-    int number_of_events = count_lines(argv[file_position]) >> 1;
+    uint32_t number_of_events = count_lines(argv[file_position]) >> 1;
 
     event_t* events = malloc(sizeof(event_t) * number_of_events);
 
@@ -259,9 +300,8 @@ int main(int argc, char *argv[]) {
 
     int socket_fd = bind_socket(port);
 
-
     do {
-        handle_next_request(socket_fd);
+        handle_next_request(socket_fd, events, number_of_events);
     } while (true);
     printf("finished exchange\n");
 
