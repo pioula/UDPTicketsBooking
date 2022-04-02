@@ -12,18 +12,115 @@
 
 #define BUFFER_SIZE 100000
 #define COMMAND_LINE_LENGTH 4096
+#define WRONG_USAGE "wrong usage"
+
+#define DEFAULT_PORT 2022
+
+#define TIMEOUT_MAX 86400
+#define DEFAULT_TIMEOUT 5
+
+#define FILE_LINE_LENGTH 80
 
 char shared_buffer[BUFFER_SIZE];
 
-uint16_t read_port(char *string) {
+unsigned long read_number(char *string) {
     errno = 0;
-    unsigned long port = strtoul(string, NULL, 10);
+    unsigned long number = strtoul(string, NULL, 10);
     PRINT_ERRNO();
+    return number;
+}
+
+uint16_t read_port(char *string) {
+    uint16_t port = read_number(string);
     if (port > UINT16_MAX) {
         fatal("%ul is not a valid port number", port);
     }
 
-    return (uint16_t) port;
+    return port;
+}
+
+uint32_t read_timeout(char *string) {
+    uint32_t timeout = read_number(string);
+    if (timeout > TIMEOUT_MAX) {
+        fatal("%ul is not a valid timout", timeout);
+    }
+
+    return timeout;
+}
+
+
+int find_flag(const char* flag, char *argv[], int argc, int *flag_counter) {
+    int flag_position = 0;
+    for (int i = 1; i < argc; i++) {
+        if (strcmp(flag, argv[i]) == 0) {
+            flag_position = i;
+            (*flag_counter)++;
+        }
+    }
+
+    return flag_position;
+}
+
+FILE* get_file(char *argv[], int argc) {
+    int count_f = 0;
+    int flag_position = find_flag("-f", argv, argc, &count_f);
+
+    if (count_f == 0 || count_f > 1 || flag_position + 1 == argc) {
+        fatal(WRONG_USAGE);
+    }
+
+    FILE* tmp = fopen(argv[flag_position + 1], "r");
+    if (tmp) {
+        return tmp;
+    }
+    else {
+        fclose(tmp);
+        fatal("Error while loading file");
+    }
+
+    assert(false);
+}
+
+uint16_t get_port(char *argv[], int argc) {
+    int count_p = 0;
+    int flag_position = find_flag("-p", argv, argc, &count_p);
+
+    if (count_p == 0)
+        return DEFAULT_PORT;
+
+    if (count_p > 1 || flag_position + 1 == argc)
+        fatal(WRONG_USAGE);
+
+    return read_port(argv[flag_position + 1]);
+}
+
+uint32_t get_timeout(char *argv[], int argc) {
+    int count_t = 0;
+    int flag_position = find_flag("-t", argv, argc, &count_t);
+    if (count_t > 1 || flag_position + 1 == argc)
+        fatal(WRONG_USAGE);
+
+    if (count_t == 0)
+        return DEFAULT_TIMEOUT;
+
+    return read_timeout(argv[flag_position + 1]);
+}
+
+bool is_flag(char* string) {
+    return strcmp(string, "-f") == 0 || strcmp(string, "-p") == 0
+           || strcmp(string, "-t") == 0;
+}
+
+void check_correctness(char *argv[], int argc) {
+    if ((argc - 1) & 1) {
+        fatal(WRONG_USAGE);
+    }
+
+    for (int i = 1; i < argc; i += 2) {
+        if (!is_flag(argv[i])) {
+            fatal(WRONG_USAGE);
+        }
+    }
 }
 
 int bind_socket(uint16_t port) {
@@ -63,43 +160,17 @@ void send_message(int socket_fd, const struct sockaddr_in *client_address, const
     ENSURE(sent_length == (ssize_t) length);
 }
 
-FILE* get_file(char *argv[], int argc) {
-    int count_f = 0;
-    for (int i = 1; i < argc; i++) {
-        if (strcmp("-f", argv[i]) == 0) {
-            count_f++;
-        }
-    }
-
-    if (count_f == 0 || count_f > 1) {
-        fatal("there must be only one file");
-    }
-
-    for (int i = 1; i < argc; i++) {
-        if (strcmp("-f", argv[i]) == 0) {
-            if (i + 1 == argc) {
-                fatal("no file passed");
-            }
-            FILE* tmp = fopen(argv[i + 1], "r");
-            if (tmp) {
-                return tmp;
-            }
-            else {
-                fclose(tmp);
-                fatal("Error while loading file");
-            }
-        }
-    }
-
-    assert(false);
-}
-
 int main(int argc, char *argv[]) {
     if (argc < 2 || argc > 6) {
         fatal("usage: %s -f <file> -p <port> -t <timeout>", argv[0]);
     }
 
+    check_correctness(argv, argc);
     FILE* file = get_file(argv, argc);
+    uint16_t port = get_port(argv, argc);
+    uint32_t timeout = get_timeout(argv, argc);
+
+
 
     /*int coms = 0;
     uint16_t port = read_port(argv[1]);
