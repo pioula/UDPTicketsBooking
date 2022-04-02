@@ -13,6 +13,7 @@
 #define BUFFER_SIZE 100000
 #define COMMAND_LINE_LENGTH 4096
 #define WRONG_USAGE "wrong usage"
+#define MALLOC_ERROR "malloc error"
 
 #define DEFAULT_PORT 2022
 
@@ -22,6 +23,11 @@
 #define FILE_LINE_LENGTH 80
 
 char shared_buffer[BUFFER_SIZE];
+
+typedef struct Event {
+    char description[FILE_LINE_LENGTH];
+    uint16_t tickets;
+} event_t;
 
 unsigned long read_number(char *string) {
     errno = 0;
@@ -61,7 +67,17 @@ int find_flag(const char* flag, char *argv[], int argc, int *flag_counter) {
     return flag_position;
 }
 
-FILE* get_file(char *argv[], int argc) {
+FILE* open_file(char *path) {
+    FILE* tmp = fopen(path, "r");
+    if (!tmp) {
+        fclose(tmp);
+        fatal("Error while loading file");
+    }
+
+    return tmp;
+}
+
+int get_file(char *argv[], int argc) {
     int count_f = 0;
     int flag_position = find_flag("-f", argv, argc, &count_f);
 
@@ -69,16 +85,7 @@ FILE* get_file(char *argv[], int argc) {
         fatal(WRONG_USAGE);
     }
 
-    FILE* tmp = fopen(argv[flag_position + 1], "r");
-    if (tmp) {
-        return tmp;
-    }
-    else {
-        fclose(tmp);
-        fatal("Error while loading file");
-    }
-
-    assert(false);
+    return flag_position + 1;
 }
 
 uint16_t get_port(char *argv[], int argc) {
@@ -160,17 +167,49 @@ void send_message(int socket_fd, const struct sockaddr_in *client_address, const
     ENSURE(sent_length == (ssize_t) length);
 }
 
+int count_lines(char* path) {
+    FILE* f = open_file(path);
+    char ch;
+    int lines_count = 0;
+    while ((ch = (char)fgetc(f)) != EOF) {
+        if (ch == '\n')
+            lines_count++;
+    }
+
+    fclose(f);
+    return lines_count;
+}
+
+void load_events(event_t *events, int n, char* file_path) {
+    FILE* f = open_file(file_path);
+    for (int i = 0; i < n; i++) {
+        int it = 0;
+
+        for (char c = (char)fgetc(f); c != EOF && c != '\n'; c = (char)fgetc(f))
+            events[i].description[it++] = c;
+
+        // File is correct
+        fscanf(f, "%hu", &events[i].tickets); // NOLINT(cert-err34-c)
+    }
+
+    fclose(f);
+}
+
 int main(int argc, char *argv[]) {
     if (argc < 2 || argc > 6) {
         fatal("usage: %s -f <file> -p <port> -t <timeout>", argv[0]);
     }
 
     check_correctness(argv, argc);
-    FILE* file = get_file(argv, argc);
+    int file_position = get_file(argv, argc);
     uint16_t port = get_port(argv, argc);
     uint32_t timeout = get_timeout(argv, argc);
 
+    int number_of_events = count_lines(argv[file_position]) >> 1;
 
+    event_t* events = malloc(sizeof(event_t) * number_of_events);
+
+    load_events(events, number_of_events, argv[file_position]);
 
     /*int coms = 0;
     uint16_t port = read_port(argv[1]);
@@ -195,6 +234,6 @@ int main(int argc, char *argv[]) {
 
     CHECK_ERRNO(close(socket_fd));*/
 
-    fclose(file);
+    free(events);
     return 0;
 }
