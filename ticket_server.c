@@ -10,7 +10,7 @@
 
 #include "err.h"
 
-#define BUFFER_SIZE 100000
+#define BUFFER_SIZE 65507
 #define COMMAND_LINE_LENGTH 4096
 #define WRONG_USAGE "wrong usage"
 #define MALLOC_ERROR "malloc error"
@@ -22,9 +22,20 @@
 
 #define FILE_LINE_LENGTH 80
 
+#define GET_EVENTS 1
+#define EVENTS 2
+#define GET_RESERVATION 3
+#define RESERVATION 4
+#define GET_TICKETS 5
+#define TICKETS 6
+#define BAD_REQUEST 255
+
 char shared_buffer[BUFFER_SIZE];
+char input_buffer[BUFFER_SIZE];
+
 
 typedef struct Event {
+    unsigned short line_length;
     char description[FILE_LINE_LENGTH];
     uint16_t tickets;
 } event_t;
@@ -183,16 +194,49 @@ int count_lines(char* path) {
 void load_events(event_t *events, int n, char* file_path) {
     FILE* f = open_file(file_path);
     for (int i = 0; i < n; i++) {
-        int it = 0;
+        unsigned short it = 0;
 
         for (char c = (char)fgetc(f); c != EOF && c != '\n'; c = (char)fgetc(f))
             events[i].description[it++] = c;
-
+        events[i].line_length = it;
         // File is correct
         fscanf(f, "%hu", &events[i].tickets); // NOLINT(cert-err34-c)
     }
 
     fclose(f);
+}
+
+uint8_t read_message_id(char* string) {
+    unsigned long number = read_number(string);
+    if (number >= 0 && number <= UINT8_MAX) {
+        return (uint8_t)number;
+    }
+
+    return 0;
+}
+
+void handle_next_request(int socket_fd) {
+    struct sockaddr_in client_address;
+    size_t read_length = read_message(socket_fd,
+                               &client_address,
+                               shared_buffer,
+                               sizeof(shared_buffer));
+    uint8_t message_id;
+    FILE* client_message_stream = fmemopen(shared_buffer,
+                                           strlen(shared_buffer), "r");
+
+    fscanf(client_message_stream, "%s", input_buffer);
+    message_id = read_message_id(input_buffer);
+    switch (message_id) {
+        case GET_EVENTS:
+
+            break;
+        case GET_RESERVATION:
+            break;
+        case GET_TICKETS:
+            break;
+    }
+
 }
 
 int main(int argc, char *argv[]) {
@@ -211,28 +255,17 @@ int main(int argc, char *argv[]) {
 
     load_events(events, number_of_events, argv[file_position]);
 
-    /*int coms = 0;
-    uint16_t port = read_port(argv[1]);
-    printf("Listening on port %u\n", port);
-
     memset(shared_buffer, 0, sizeof(shared_buffer));
 
     int socket_fd = bind_socket(port);
 
-    struct sockaddr_in client_address;
-    size_t read_length;
+
     do {
-        read_length = read_message(socket_fd, &client_address, shared_buffer, sizeof(shared_buffer));
-        char* client_ip = inet_ntoa(client_address.sin_addr);
-        uint16_t client_port = ntohs(client_address.sin_port);
-        printf("received %zd bytes from client %s:%u\n", read_length, client_ip, client_port); // note: we specify the length of the printed string
-        send_message(socket_fd, &client_address, shared_buffer, read_length);
-	coms++;
-	printf("%d\n", coms);
-    } while (read_length > 0);
+        handle_next_request(socket_fd);
+    } while (true);
     printf("finished exchange\n");
 
-    CHECK_ERRNO(close(socket_fd));*/
+    CHECK_ERRNO(close(socket_fd));
 
     free(events);
     return 0;
