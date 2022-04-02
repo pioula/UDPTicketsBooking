@@ -10,7 +10,7 @@
 
 #include "err.h"
 
-#define BUFFER_SIZE 10000000
+#define BUFFER_SIZE 65507
 
 char shared_buffer[BUFFER_SIZE];
 
@@ -24,14 +24,6 @@ uint16_t read_port(char *string) {
 
     return (uint16_t) port;
 }
-
-uint32_t read_nk(char *string) {
-    errno = 0;
-    uint32_t nk = strtoul(string, NULL, 10);
-    PRINT_ERRNO();
-    return nk;
-}
-
 
 struct sockaddr_in get_send_address(char *host, uint16_t port) {
     struct addrinfo hints;
@@ -84,8 +76,8 @@ size_t receive_message(int socket_fd, struct sockaddr_in *receive_address, char 
 
 
 int main(int argc, char *argv[]) {
-    if (argc < 4) {
-        fatal("Usage: %s <host> <port> <n> <k> ...\n", argv[0]);
+    if (argc < 3) {
+        fatal("Usage: %s <host> <port> <message> ...\n", argv[0]);
     }
 
     char *host = argv[1];
@@ -100,22 +92,14 @@ int main(int argc, char *argv[]) {
     char *client_ip = inet_ntoa(send_address.sin_addr);
     uint16_t client_port = ntohs(send_address.sin_port);
 
-    uint32_t n = read_nk(argv[3]);
-    uint32_t k = read_nk(argv[4]);
-
-    char *communicat = malloc(k * sizeof(char));
-    memset(communicat, '{', k);
-
-    for (int i = 0; i < n; i++) {
-        send_message(socket_fd, &send_address, communicat);
-        //printf("sent to %s:%u: '%s'\n", client_ip, client_port, argv[i]);
+    for (int i = 3; i < argc; i++) {
+        send_message(socket_fd, &send_address, "1");
+        printf("sent to %s:%u: '%s'\n", client_ip, client_port, argv[i]);
         memset(shared_buffer, 0, sizeof(shared_buffer)); // clean the buffer
         size_t max_length = sizeof(shared_buffer) - 1; // leave space for the null terminator
         size_t received_length = receive_message(socket_fd, &send_address, shared_buffer, max_length);
-        //printf("received %zd bytes from %s:%u: '%s'\n", received_length, client_ip, client_port, shared_buffer);
+        printf("received %zd bytes from %s:%u: '%s'\n", received_length, client_ip, client_port, shared_buffer);
     }
-
-    puts("Done!");
 
     CHECK_ERRNO(close(socket_fd));
 

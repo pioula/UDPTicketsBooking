@@ -21,6 +21,7 @@
 
 #define FILE_LINE_LENGTH 80
 
+#define EMPTY_COMMAND 0
 #define GET_EVENTS 1
 #define EVENTS 2
 #define GET_RESERVATION 3
@@ -34,7 +35,7 @@ char input_buffer[BUFFER_SIZE];
 
 
 typedef struct Event {
-    uint8_t line_length;
+    uint16_t line_length;
     char description[FILE_LINE_LENGTH];
     uint16_t tickets;
 } event_t;
@@ -47,12 +48,12 @@ unsigned long read_number(char *string) {
 }
 
 uint16_t read_port(char *string) {
-    uint16_t port = read_number(string);
+    unsigned long port = read_number(string);
     if (port > UINT16_MAX) {
         fatal("%ul is not a valid port number", port);
     }
 
-    return port;
+    return (uint16_t)port;
 }
 
 uint32_t read_timeout(char *string) {
@@ -180,7 +181,7 @@ void send_message(int socket_fd, const struct sockaddr_in *client_address, const
 int count_lines(char* path) {
     FILE* f = open_file(path);
     char ch;
-    int lines_count = 0;
+    int lines_count = 1;
     while ((ch = (char)fgetc(f)) != EOF) {
         if (ch == '\n')
             lines_count++;
@@ -194,34 +195,25 @@ void load_events(event_t *events, uint32_t n, char* file_path) {
     FILE* f = open_file(file_path);
     for (uint32_t i = 0; i < n; i++) {
         unsigned short it = 0;
-
+        memset(events[i].description, 0, sizeof(events[i].description));
         for (char c = (char)fgetc(f); c != EOF && c != '\n'; c = (char)fgetc(f))
             events[i].description[it++] = c;
         events[i].line_length = it;
+
         // File is correct
-        fscanf(f, "%hu", &events[i].tickets); // NOLINT(cert-err34-c)
+        fscanf(f, "%hu ", &events[i].tickets); // NOLINT(cert-err34-c)
     }
 
     fclose(f);
 }
 
-uint8_t read_message_id(char* string) {
+uint16_t read_message_id(char* string) {
     unsigned long number = read_number(string);
-    if (number >= 0 && number <= UINT8_MAX) {
-        return (uint8_t)number;
+    if (number <= UINT8_MAX) {
+        return (uint16_t)number;
     }
 
-    return 0;
-}
-
-uint8_t count_digits(uint16_t number) {
-    int counter = 0;
-    do {
-        counter++;
-        number /= 10;
-    } while (number > 0);
-
-    return counter;
+    return EMPTY_COMMAND;
 }
 
 void send_events(int socket_fd,
@@ -234,17 +226,20 @@ void send_events(int socket_fd,
     int number_of_bytes = 0;
 
     for (uint32_t i = 0; i < number_of_events; i++) {
-        memset(new_event, 0, strlen(new_event));
-        uint8_t new_event_length = sprintf(new_event, "%u ", EVENTS);
-        new_event_length = sprintf(new_event + new_event_length, "%hu ",
+        memset(new_event, 0, 2 * FILE_LINE_LENGTH);
+        printf("%hu %hu %s\n", events[i].tickets, events[i].line_length, events[i].description);
+        uint16_t new_event_length = sprintf(new_event, "%u", EVENTS);
+        new_event_length += sprintf(new_event + new_event_length, " %hu",
                                    events[i].tickets);
-        new_event_length = sprintf(new_event + new_event_length, "%hhu ",
+        new_event_length += sprintf(new_event + new_event_length, " %hu",
                                    events[i].line_length);
-        new_event_length = sprintf(new_event + new_event_length, "%s\n",
+        new_event_length += sprintf(new_event + new_event_length, " %s\n",
                                    events[i].description);
 
         if (new_event_length + number_of_bytes > BUFFER_SIZE)
             break;
+
+        printf("%s", new_event);
 
         memcpy(&shared_buffer[number_of_bytes], new_event, new_event_length);
         number_of_bytes += new_event_length;
@@ -258,11 +253,11 @@ void send_events(int socket_fd,
 void handle_next_request(int socket_fd, event_t* events,
                          uint32_t number_of_events) {
     struct sockaddr_in client_address;
-    size_t read_length = read_message(socket_fd,
-                               &client_address,
-                               shared_buffer,
-                               sizeof(shared_buffer));
-    uint8_t message_id;
+    read_message(socket_fd,
+       &client_address,
+       shared_buffer,
+       sizeof(shared_buffer));
+    uint16_t message_id;
     FILE* client_message_stream = fmemopen(shared_buffer,
                                            strlen(shared_buffer), "r");
 
