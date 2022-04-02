@@ -6,10 +6,12 @@
 #include <string.h>
 #include <unistd.h>
 #include <stdint.h>
+#include <assert.h>
 
 #include "err.h"
 
 #define BUFFER_SIZE 100000
+#define COMMAND_LINE_LENGTH 4096
 
 char shared_buffer[BUFFER_SIZE];
 
@@ -61,11 +63,45 @@ void send_message(int socket_fd, const struct sockaddr_in *client_address, const
     ENSURE(sent_length == (ssize_t) length);
 }
 
-int main(int argc, char *argv[]) {
-    if (argc != 2) {
-        fatal("usage: %s <port>", argv[0]);
+FILE* get_file(char *argv[], int argc) {
+    int count_f = 0;
+    for (int i = 1; i < argc; i++) {
+        if (strcmp("-f", argv[i]) == 0) {
+            count_f++;
+        }
     }
-    int coms = 0;
+
+    if (count_f == 0 || count_f > 1) {
+        fatal("there must be only one file");
+    }
+
+    for (int i = 1; i < argc; i++) {
+        if (strcmp("-f", argv[i]) == 0) {
+            if (i + 1 == argc) {
+                fatal("no file passed");
+            }
+            FILE* tmp = fopen(argv[i + 1], "r");
+            if (tmp) {
+                return tmp;
+            }
+            else {
+                fclose(tmp);
+                fatal("Error while loading file");
+            }
+        }
+    }
+
+    assert(false);
+}
+
+int main(int argc, char *argv[]) {
+    if (argc < 2 || argc > 6) {
+        fatal("usage: %s -f <file> -p <port> -t <timeout>", argv[0]);
+    }
+
+    FILE* file = get_file(argv, argc);
+
+    /*int coms = 0;
     uint16_t port = read_port(argv[1]);
     printf("Listening on port %u\n", port);
 
@@ -86,7 +122,8 @@ int main(int argc, char *argv[]) {
     } while (read_length > 0);
     printf("finished exchange\n");
 
-    CHECK_ERRNO(close(socket_fd));
+    CHECK_ERRNO(close(socket_fd));*/
 
+    fclose(file);
     return 0;
 }
