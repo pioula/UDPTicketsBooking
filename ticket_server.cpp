@@ -46,7 +46,6 @@ constexpr uint8_t GET_TICKETS = 5;
 constexpr uint8_t TICKETS = 6;
 constexpr uint8_t BAD_REQUEST = 255;
 
-
 char shared_buffer[BUFFER_SIZE];
 char input_buffer[BUFFER_SIZE];
 
@@ -67,7 +66,8 @@ private:
         // after socket() call; we should close(sock) on any execution path;
 
         server_address.sin_family = AF_INET; // IPv4
-        server_address.sin_addr.s_addr = htonl(INADDR_ANY); // listening on all interfaces
+        // listening on all interfaces
+        server_address.sin_addr.s_addr = htonl(INADDR_ANY);
         server_address.sin_port = htons(port);
 
         // bind the socket to a concrete address
@@ -77,8 +77,6 @@ private:
             puts("TODO bind_socket");
         }
     }
-
-
 public:
     ServerHandler(port_t _port): port(_port) {
         bind_socket();
@@ -342,13 +340,17 @@ public:
 
         return nullopt;
     }
+
+    timeout_t get_timeout() {
+        return timeout;
+    }
 };
 
 unsigned long read_number(char *string) {
     errno = 0;
     unsigned long number = strtoul(string, nullptr, 10);
     if (errno != 0) {
-        puts("TODO ZABEZPIECZENIE");
+        puts("TODO READ_NUMBER");
     }
     return number;
 }
@@ -459,7 +461,7 @@ void send_events(ServerHandler &server_handler, Events events) {
         if (new_event.size() + number_of_bytes > BUFFER_SIZE)
             continue;
 
-        std::cout << new_event;
+        std::cout << new_event; //TODO REMOVE DEBUG
 
         new_message += new_event;
         number_of_bytes += new_event.size();
@@ -476,6 +478,13 @@ void make_reservation(ServerHandler &server_handler,
 
     pair<id_t, Reservations::reservation> res =
             reservations.book(event_id, tickets_count);
+    string message = to_string(RESERVATION) + " " +
+            to_string(res.second.event_id) + " " +
+            to_string(res.second.tickets) + " " +
+            res.second.cookie + " " +
+            std::to_string(reservations.get_timeout());
+    std::cout << message << "\n";
+    server_handler.send_message(message.c_str(), message.size());
 }
 
 
@@ -523,6 +532,7 @@ int main(int argc, char *argv[]) {
     do {
         handle_next_request(server_handler, reservations);
     } while (true);
+
     printf("finished exchange\n");
 
     return 0;
