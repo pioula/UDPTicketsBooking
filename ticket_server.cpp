@@ -50,6 +50,62 @@ constexpr uint8_t BAD_REQUEST = 255;
 char shared_buffer[BUFFER_SIZE];
 char input_buffer[BUFFER_SIZE];
 
+class ServerHandler {
+private:
+    using sockaddr_t = struct sockaddr_in;
+    using port_t = uint16_t;
+    using socket_t = int;
+    socket_t socket_fd{};
+    port_t port;
+    sockaddr_t server_address{};
+    sockaddr_t client_address{};
+    socklen_t client_address_length{};
+
+    void bind_socket() {
+        socket_fd = socket(AF_INET, SOCK_DGRAM, 0); // creating IPv4 UDP socket
+        ENSURE(socket_fd > 0);
+        // after socket() call; we should close(sock) on any execution path;
+
+        server_address.sin_family = AF_INET; // IPv4
+        server_address.sin_addr.s_addr = htonl(INADDR_ANY); // listening on all interfaces
+        server_address.sin_port = htons(port);
+
+        // bind the socket to a concrete address
+        errno = 0;
+        if (bind(socket_fd, (struct sockaddr *) &server_address,
+                 (socklen_t) sizeof(server_address)) != 0) {
+            puts("TODO bind_socket");
+        }
+    }
+
+
+public:
+    ServerHandler(port_t _port): port(_port) {
+        bind_socket();
+    }
+
+    size_t read_message(char *buffer, size_t max_length) {
+        client_address_length = (socklen_t) sizeof(client_address);
+        int flags = 0; // we do not request anything special
+        errno = 0;
+        ssize_t len = recvfrom(socket_fd, buffer, max_length, flags,
+                               (struct sockaddr *) &client_address,
+                               &client_address_length);
+        if (len < 0) {
+            puts("TODO read_message");
+        }
+        return (size_t) len;
+    }
+
+    void send_message(const char *message, size_t length) {
+        int flags = 0;
+        ssize_t sent_length = sendto(socket_fd, message, length, flags,
+                                     (struct sockaddr *) &client_address,
+                                     client_address_length);
+        ENSURE(sent_length == (ssize_t) length);
+    }
+};
+
 using reservation_response_t = struct reservation_response {
     bool success;
     id_t reservation_id;
@@ -380,46 +436,6 @@ void check_correctness(char *argv[], int argc) {
     }
 }
 
-int bind_socket(uint16_t port) {
-    int socket_fd = socket(AF_INET, SOCK_DGRAM, 0); // creating IPv4 UDP socket
-    ENSURE(socket_fd > 0);
-    // after socket() call; we should close(sock) on any execution path;
-
-    struct sockaddr_in server_address;
-    server_address.sin_family = AF_INET; // IPv4
-    server_address.sin_addr.s_addr = htonl(INADDR_ANY); // listening on all interfaces
-    server_address.sin_port = htons(port);
-
-    // bind the socket to a concrete address
-    errno = 0;
-    if (bind(socket_fd, (struct sockaddr *) &server_address,
-                     (socklen_t) sizeof(server_address)) != 0) {
-        puts("TODO bind_socket");
-    }
-
-    return socket_fd;
-}
-
-size_t read_message(int socket_fd, struct sockaddr_in *client_address, char *buffer, size_t max_length) {
-    socklen_t address_length = (socklen_t) sizeof(*client_address);
-    int flags = 0; // we do not request anything special
-    errno = 0;
-    ssize_t len = recvfrom(socket_fd, buffer, max_length, flags,
-                           (struct sockaddr *) client_address, &address_length);
-    if (len < 0) {
-        puts("TODO read_message");
-    }
-    return (size_t) len;
-}
-
-void send_message(int socket_fd, const struct sockaddr_in *client_address, const char *message, size_t length) {
-    socklen_t address_length = (socklen_t) sizeof(*client_address);
-    int flags = 0;
-    ssize_t sent_length = sendto(socket_fd, message, length, flags,
-                                 (struct sockaddr *) client_address, address_length);
-    ENSURE(sent_length == (ssize_t) length);
-}
-
 uint16_t read_message_id(char* string) {
     unsigned long number = read_number(string);
     if (number <= UINT8_MAX) {
@@ -429,33 +445,30 @@ uint16_t read_message_id(char* string) {
     return EMPTY_COMMAND;
 }
 
-void send_events(int socket_fd,
-                 struct sockaddr_in &client_address,
-                 Events events) {
+void send_events(ServerHandler &server_handler, Events events) {
     string new_event;
     size_t number_of_bytes = 0;
     string new_message;
 
     for (size_t i = 0; i < events.size(); i++) {
         new_event = to_string(EVENTS)
-            + " " + to_string(events.get_tickets(i))
-            + " " + to_string(events.get_description(i).size())
-            + " " + events.get_description(i) + "\n";
+                    + " " + to_string(events.get_tickets(i))
+                    + " " + to_string(events.get_description(i).size())
+                    + " " + events.get_description(i) + "\n";
 
         if (new_event.size() + number_of_bytes > BUFFER_SIZE)
             continue;
 
-        std::cout << new_event << "\n";
+        std::cout << new_event;
 
         new_message += new_event;
         number_of_bytes += new_event.size();
     }
 
-    send_message(socket_fd, &client_address,
-                 new_message.c_str(), new_message.size());
+    server_handler.send_message(new_message.c_str(), new_message.size());
 }
 
-void make_reservation(int socket_fd, struct sockaddr_in &client_address,
+void make_reservation(ServerHandler &server_handler,
                       Reservations &reservations, FILE* stream) {
     uint32_t event_id;
     int16_t tickets_count;
@@ -466,12 +479,9 @@ void make_reservation(int socket_fd, struct sockaddr_in &client_address,
 }
 
 
-void handle_next_request(int socket_fd, Reservations &reservations) {
-    struct sockaddr_in client_address;
-    read_message(socket_fd,
-                 &client_address,
-                 shared_buffer,
-                 sizeof(shared_buffer));
+void handle_next_request(ServerHandler &server_handler,
+                         Reservations &reservations) {
+    server_handler.read_message(shared_buffer, sizeof(shared_buffer));
     uint16_t message_id;
     FILE* client_message_stream = fmemopen(shared_buffer,
                                            strlen(shared_buffer), "r");
@@ -480,10 +490,10 @@ void handle_next_request(int socket_fd, Reservations &reservations) {
     message_id = read_message_id(input_buffer);
     switch (message_id) {
         case GET_EVENTS:
-            send_events(socket_fd, client_address, reservations.get_events());
+            send_events(server_handler, reservations.get_events());
             break;
         case GET_RESERVATION:
-            make_reservation(socket_fd, client_address,
+            make_reservation(server_handler,
                              reservations, client_message_stream);
             break;
         case GET_TICKETS:
@@ -504,15 +514,14 @@ int main(int argc, char *argv[]) {
     uint16_t port = get_port(argv, argc);
     uint32_t timeout = get_timeout(argv, argc);
 
+    ServerHandler server_handler(port);
     Events events(argv[file_position]);
     Reservations reservations(timeout, events);
 
     memset(shared_buffer, 0, sizeof(shared_buffer));
 
-    int socket_fd = bind_socket(port);
-
     do {
-        handle_next_request(socket_fd, reservations);
+        handle_next_request(server_handler, reservations);
     } while (true);
     printf("finished exchange\n");
 
