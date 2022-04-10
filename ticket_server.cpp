@@ -187,10 +187,10 @@ public:
 
 class CommunicatHandler {
 private:
-    char communicat[BUFFER_SIZE]{};
-    size_t length{};
-    size_t read_com_ptr{};
-    size_t write_com_ptr{};
+    char communicat[BUFFER_SIZE];
+    size_t length;
+    size_t read_com_ptr;
+    size_t write_com_ptr;
     ServerHandler server_handler;
 
     void inverse_string(char* str, size_t bytes) {
@@ -308,15 +308,9 @@ private:
             fields[pos] = 'A';
         }
     }
-
+public:
     TicketPrinter() {
         memset(fields, '0', TICKET_LENGTH);
-    }
-
-    static const TicketPrinter instance;
-public:
-    static TicketPrinter get_instance() {
-        return instance;
     }
 
     string get_unique_ticket() {
@@ -328,38 +322,11 @@ public:
         std::cout << res << std::endl;
         return res;
     }
-};
 
-class Tickets {
-private:
-    vector<string> tickets;
-    id_t reservation_id;
-    TicketPrinter ticket_printer;
-
-    void generate_new_ticket() {
-        tickets.push_back(ticket_printer.get_unique_ticket());
-    }
-public:
-    Tickets(id_t _reservation_id, tickets_t ticket_count):
-            reservation_id(_reservation_id),
-            ticket_printer(TicketPrinter::get_instance()) {
-        if (ticket_count != 0) {
-            for (tickets_t i = 0; i < ticket_count; i++) {
-                generate_new_ticket();
-            }
+    void fill_tickets(vector<string> &ticket_container, tickets_t count) {
+        for (tickets_t ticket = 0; ticket < count; ++ticket) {
+            ticket_container.push_back(get_unique_ticket());
         }
-    }
-
-    id_t* get_reservation_id() {
-        return &reservation_id;
-    }
-
-    vector<string> get_tickets() {
-        return tickets;
-    }
-
-    size_t get_count() {
-        return tickets.size();
     }
 };
 
@@ -367,7 +334,7 @@ class Events {
 private:
     using event_t = struct event {
         string description;
-        uint16_t tickets;
+        tickets_t tickets;
     };
 
     size_t n;
@@ -406,34 +373,19 @@ public:
     }
 };
 
-class Reservation {
-private:
+using reservation_t = struct Reservation {
     id_t event_id;
     string cookie;
     timeout_t expiration_time;
-    Tickets tickets;
+    vector<string> tickets;
     bool is_read;
-public:
-    Reservation(timeout_t timeout):
-        is_read(false),
-        expiration_time(time(nullptr) + timeout) {
-
-    }
 };
 
 class EventsServer {
-public:
-    using reservation_t = struct reservation {
-        id_t event_id;
-        string cookie;
-        timeout_t expiration_time;
-        Tickets tickets;
-        bool is_read;
-    };
 private:
     static constexpr id_t MIN_RESERVATION_ID = 1000000;
     using deadline_t = struct deadline {
-        timeout_t timeout;
+        timeout_t expiration_time;
         id_t reservation_id;
     };
 
@@ -442,16 +394,17 @@ private:
     vector<reservation_t> reservations;
     id_t next_id;
     queue<deadline_t> deadlines;
+    TicketPrinter ticket_printer;
 
     void update_reservations() {
         time_t current_time = time(nullptr);
         while (!deadlines.empty()) {
-            if ((time_t)deadlines.front().timeout < current_time) {
+            if ((time_t)deadlines.front().expiration_time < current_time) {
                 deadline d = deadlines.front();
                 deadlines.pop();
                 if (!reservations[d.reservation_id].is_read) {
                     events.add_tickets(reservations[d.reservation_id].event_id,
-                           reservations[d.reservation_id].tickets.get_count());
+                           reservations[d.reservation_id].tickets.size());
                     reservations[d.reservation_id].cookie = generate_cookie();
                 }
             }
@@ -474,13 +427,14 @@ private:
     }
 public:
     EventsServer(timeout_t _timeout, Events &_events):
-        timeout(_timeout), events(_events), next_id(0) {}
+        timeout(_timeout), events(_events), next_id(0),
+        ticket_printer() {}
 
     Events get_events() {
         return events;
     }
 
-    optional<pair<id_t, reservation_t>>
+    optional<pair<id_t, Reservation>>
             book_event(id_t event_id, tickets_t ticket_count) {
         update_reservations();
         if (event_id >= events.size() || ticket_count == 0 ||
@@ -491,14 +445,14 @@ public:
 
         id_t reservation_id = get_new_reservation_id();
         reservation_t reservation;
-        reservation.tickets = Tickets(reservation_id, ticket_count);
+        ticket_printer.fill_tickets(reservation.tickets, ticket_count);
         reservation.event_id = event_id;
         reservation.cookie = generate_cookie();
         reservation.expiration_time = time(nullptr) + timeout;
         reservation.is_read = false;
 
         deadline_t deadline;
-        deadline.timeout = reservation.expiration_time;
+        deadline.expiration_time = reservation.expiration_time;
         deadline.reservation_id = reservation_id;
 
         deadlines.push(deadline);
@@ -509,7 +463,7 @@ public:
         return make_pair(reservation_id + MIN_RESERVATION_ID, reservation);
     }
 
-    optional<Tickets> get_tickets(id_t reservation_id, string &cookie) {
+    optional<vector<string>> get_tickets(id_t reservation_id, string &cookie) {
         reservation_id -= MIN_RESERVATION_ID;
         update_reservations();
 
@@ -655,7 +609,7 @@ void make_reservation(CommunicatHandler &handler,
     handler.start_writing();
     if (auto res = reservations.book_event(event_id, tickets_count)) {
         uint8_t message_id = RESERVATION;
-        tickets_t ticketCount = res->second.tickets.get_count();
+        tickets_t ticketCount = res->second.tickets.size();
         handler.write_bytes(&message_id, MESSAGE_ID_B)
             ->write_bytes(&(res->first), RESERVATION_ID_B)
             ->write_bytes(&(res->second.event_id), EVENT_ID_B)
@@ -700,12 +654,11 @@ void send_tickets(CommunicatHandler &handler, EventsServer &reservations) {
 
     if (auto tickets = reservations.get_tickets(reservation_id, cookie_s)) {
         uint8_t message_id = TICKETS;
-        size_t tickets_count = (*tickets).get_tickets().size();
+        size_t tickets_count = (*tickets).size();
         handler.write_bytes(&message_id, MESSAGE_ID_B)
             ->write_bytes(&reservation_id, RESERVATION_ID_B)
             ->write_bytes(&tickets_count, TICKET_COUNT_B);
-        vector<string> tickets_ids = (*tickets).get_tickets();
-        for (auto & tickets_id : tickets_ids) {
+        for (auto & tickets_id : (*tickets)) {
             handler.write_bytes(tickets_id.c_str(), TICKET_B);
         }
         handler.send_communicat();
@@ -742,7 +695,7 @@ int main(int argc, char *argv[]) {
     srand(time(nullptr));
 
     if (argc <= 2) {
-        fatal("usage: %s -f <file> -p <port> -t <timeout>", argv[0]);
+        fatal("usage: %s -f <file> -p <port> -t <expiration_time>", argv[0]);
     }
 
     check_correctness(argv, argc);
