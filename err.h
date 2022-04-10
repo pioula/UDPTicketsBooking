@@ -32,9 +32,10 @@
 // Check if errno is non-zero, and if so, print an error message and exit with an error.
 #define PRINT_ERRNO()                                                  \
     do {                                                               \
-        if (errno != 0) {                                              \
+        if ((*__errno_location()) != 0) {                                              \
             fprintf(stderr, "Error: errno %d in %s at %s:%d\n%s\n",    \
-              errno, __func__, __FILE__, __LINE__, strerror(errno));   \
+              (*__errno_location()), __func__, __FILE__, __LINE__,     \
+              strerror((*__errno_location())));   \
             exit(EXIT_FAILURE);                                        \
         }                                                              \
     } while (0)

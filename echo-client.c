@@ -93,7 +93,7 @@ int main(int argc, char *argv[]) {
     uint16_t client_port = ntohs(send_address.sin_port);
 
     for (int i = 3; i < argc; i++) {
-        send_message(socket_fd, &send_address, "1");
+        send_message(socket_fd, &send_address, "3 0 3");
         printf("sent to %s:%u: '%s'\n", client_ip, client_port, argv[i]);
         memset(shared_buffer, 0, sizeof(shared_buffer)); // clean the buffer
         size_t max_length = sizeof(shared_buffer) - 1; // leave space for the null terminator

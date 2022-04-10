@@ -162,7 +162,7 @@ public:
     }
 
     CommunicatHandler* write_bytes(const void* src, size_t bytes) {
-        memcpy(communicat, src, bytes);
+        memcpy(communicat + write_com_ptr, src, bytes);
         write_com_ptr += bytes;
         return this;
     }
@@ -513,19 +513,21 @@ void send_events(CommunicatHandler &handler, Events events) {
     if (handler.get_length() > GET_EVENTS_SIZE) return;
 
     handler.start_writing();
-    size_t number_of_bytes = 0;
+    uint8_t message_id = EVENTS;
+    size_t number_of_bytes = handler.write_bytes(&message_id, MESSAGE_ID_B)
+                                ->get_written_buffer_length();
 
-    for (size_t i = 0; i < events.size(); i++) {
+    for (id_t event_id = 0; event_id < events.size(); event_id++) {
         if (number_of_bytes + EVENTS_SIZE +
-            events.get_description(i)->size() > BUFFER_SIZE) {
+            events.get_description(event_id)->size() > BUFFER_SIZE) {
             continue;
         }
-        uint8_t message_id = EVENTS;
-        uint8_t description_length = events.get_description(i)->size();
-        number_of_bytes = handler.write_bytes(&message_id, MESSAGE_ID_B)
-            ->write_bytes(events.get_tickets(i), TICKET_COUNT_B)
+        uint32_t test = event_id + 1;
+        uint8_t description_length = events.get_description(event_id)->size();
+        number_of_bytes = handler.write_bytes(&test, EVENT_ID_B)
+            ->write_bytes(events.get_tickets(event_id), TICKET_COUNT_B)
             ->write_bytes(&description_length, DESCRIPTION_LEN_B)
-            ->write_bytes(events.get_description(i), description_length)
+            ->write_bytes(events.get_description(event_id), description_length)
             ->get_written_buffer_length();
     }
 
@@ -620,6 +622,8 @@ int main(int argc, char *argv[]) {
     int file_position = get_file(argv, argc);
     uint16_t port = get_port(argv, argc);
     uint32_t timeout = get_timeout(argv, argc);
+
+    std::cout << "Server: " << port << " " << timeout << std::endl;
 
     ServerHandler server_handler(port);
     Events events(argv[file_position]);
