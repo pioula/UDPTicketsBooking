@@ -11,18 +11,69 @@
 #include <vector>
 #include <queue>
 #include <optional>
-#include "err.h"
+#include <cstdio>
+#include <cstdlib>
+#include <cstdarg>
+#include <cerrno>
+#include <fstream>
 
-/*
-using reservation_response_t = struct reservation_response {
-    bool success;
-    id_t reservation_id;
-    id_t event_id;
-    tickets_t ticket_count;
-    string cookie;
-    timeout_t expiration_time;
-};
- */
+// Evaluate `x`: if non-zero, describe it as a standard error code and exit with an error.
+#define CHECK(x)                                                          \
+    do {                                                                  \
+        int err = (x);                                                    \
+        if (err != 0) {                                                   \
+            fprintf(stderr, "Error: %s returned %d in %s at %s:%d\n%s\n", \
+                #x, err, __func__, __FILE__, __LINE__, strerror(err));    \
+            exit(EXIT_FAILURE);                                           \
+        }                                                                 \
+    } while (0)
+
+// Evaluate `x`: if false, print an error message and exit with an error.
+#define ENSURE(x)                                                         \
+    do {                                                                  \
+        bool result = (x);                                                \
+        if (!result) {                                                    \
+            fprintf(stderr, "Error: %s was false in %s at %s:%d\n",       \
+                #x, __func__, __FILE__, __LINE__);                        \
+            exit(EXIT_FAILURE);                                           \
+        }                                                                 \
+    } while (0)
+
+// Check if errno is non-zero, and if so, print an error message and exit with an error.
+#define PRINT_ERRNO()                                                  \
+    do {                                                               \
+        if ((*__errno_location()) != 0) {                                              \
+            fprintf(stderr, "Error: errno %d in %s at %s:%d\n%s\n",    \
+              (*__errno_location()), __func__, __FILE__, __LINE__,     \
+              strerror((*__errno_location())));   \
+            exit(EXIT_FAILURE);                                        \
+        }                                                              \
+    } while (0)
+
+
+// Set `errno` to 0 and evaluate `x`. If `errno` changed, describe it and exit.
+#define CHECK_ERRNO(x)                                                             \
+    do {                                                                           \
+        errno = 0;                                                                 \
+        (void) (x);                                                                \
+        PRINT_ERRNO();                                                             \
+    } while (0)
+
+// Note: the while loop above wraps the statements so that the macro can be used with a semicolon
+// for example: if (a) CHECK(x); else CHECK(y);
+
+
+// Print an error message and exit with an error.
+void fatal(const char *fmt, ...) {
+    va_list fmt_args;
+
+    fprintf(stderr, "Error: ");
+    va_start(fmt_args, fmt);
+    vfprintf(stderr, fmt, fmt_args);
+    va_end(fmt_args);
+    fprintf(stderr, "\n");
+    exit(EXIT_FAILURE);
+}
 
 using std::stack;
 using std::vector;
@@ -33,6 +84,7 @@ using std::make_pair;
 using std::optional;
 using std::nullopt;
 using std::to_string;
+using std::swap;
 
 using id_t = uint32_t;
 using timeout_t = uint64_t;
@@ -48,6 +100,7 @@ constexpr uint8_t TICKET_B = 7;
 constexpr uint8_t COOKIE_B = 48;
 
 constexpr uint16_t DEFAULT_PORT = 2022;
+constexpr timeout_t TIMEOUT_MIN = 1;
 constexpr timeout_t TIMEOUT_MAX = 86400;
 constexpr timeout_t DEFAULT_TIMEOUT = 5;
 
@@ -114,7 +167,7 @@ public:
         client_address_length = (socklen_t) sizeof(client_address);
         int flags = 0; // we do not request anything special
         errno = 0;
-        ssize_t len = recvfrom(socket_fd, buffer, sizeof(buffer), flags,
+        ssize_t len = recvfrom(socket_fd, buffer, BUFFER_SIZE, flags,
                                (struct sockaddr *) &client_address,
                                &client_address_length);
         if (len < 0) {
@@ -139,6 +192,23 @@ private:
     size_t read_com_ptr{};
     size_t write_com_ptr{};
     ServerHandler server_handler;
+
+    void inverse_string(char* str, size_t bytes) {
+        for (size_t i = 0; i < (bytes >> 1); i++) {
+            swap(str[i], str[bytes - i - 1]);
+        }
+    }
+
+    void copy_bytes(void* dest, size_t bytes) {
+        memcpy(dest, communicat + read_com_ptr, bytes);
+        read_com_ptr += bytes;
+    }
+
+    void overwrite_bytes(const void* src, size_t bytes) {
+        memcpy(communicat + write_com_ptr, src, bytes);
+        write_com_ptr += bytes;
+    }
+
 public:
     CommunicatHandler(ServerHandler &_server_handler):
         server_handler(_server_handler) {}
@@ -152,18 +222,27 @@ public:
         return length;
     }
 
+    void read_bytes(char* dest, size_t bytes) {
+        copy_bytes(dest, bytes);
+    }
+
     void read_bytes(void* dest, size_t bytes) {
-        memcpy(dest, communicat + read_com_ptr, bytes);
-        read_com_ptr += bytes;
+        inverse_string(communicat + read_com_ptr, bytes);
+        copy_bytes(dest, bytes);
     }
 
     void start_writing() {
         write_com_ptr = 0;
     }
 
+    CommunicatHandler* write_bytes(const char* src, size_t bytes) {
+        overwrite_bytes(src, bytes);
+        return this;
+    }
+
     CommunicatHandler* write_bytes(const void* src, size_t bytes) {
-        memcpy(communicat + write_com_ptr, src, bytes);
-        write_com_ptr += bytes;
+        overwrite_bytes(src, bytes);
+        inverse_string(communicat + write_com_ptr - bytes, bytes);
         return this;
     }
 
@@ -181,7 +260,6 @@ public:
     static FILE* open_file(char *path) {
         FILE* tmp = fopen(path, "r");
         if (!tmp) {
-            fclose(tmp);
             fatal("Error while loading file");
         }
 
@@ -215,27 +293,56 @@ public:
     }
 };
 
+class TicketPrinter {
+private:
+    static constexpr uint8_t TICKET_LENGTH = 7;
+
+    char fields[TICKET_LENGTH];
+
+    void increase_position(uint8_t pos) {
+        if (++fields[pos] > 'Z') {
+            fields[pos++] = '0';
+            increase_position(pos);
+        }
+        else if (fields[pos] > '9' && fields[pos] < 'A') {
+            fields[pos] = 'A';
+        }
+    }
+
+    TicketPrinter() {
+        memset(fields, '0', TICKET_LENGTH);
+    }
+
+    static const TicketPrinter instance;
+public:
+    static TicketPrinter get_instance() {
+        return instance;
+    }
+
+    string get_unique_ticket() {
+        string res;
+        for (int i = 0; i < TICKET_LENGTH; i++) {
+            res += fields[i];
+        }
+        increase_position(0);
+        std::cout << res << std::endl;
+        return res;
+    }
+};
+
 class Tickets {
 private:
-    static constexpr uint8_t N_LETTERS = 25;
-    static constexpr uint8_t TICKET_LENGTH = 7;
     vector<string> tickets;
     id_t reservation_id;
+    TicketPrinter ticket_printer;
+
     void generate_new_ticket() {
-        string ticket;
-        for (uint8_t i = 0; i < TICKET_LENGTH; i++) {
-            if (random() % 2) {
-                ticket += (char)(random() % 'A' + N_LETTERS + 1);
-            }
-            else {
-                ticket += (char)(random() % 'a' + N_LETTERS + 1);
-            }
-        }
-        tickets.push_back(ticket);
+        tickets.push_back(ticket_printer.get_unique_ticket());
     }
 public:
     Tickets(id_t _reservation_id, tickets_t ticket_count):
-            reservation_id(_reservation_id){
+            reservation_id(_reservation_id),
+            ticket_printer(TicketPrinter::get_instance()) {
         if (ticket_count != 0) {
             for (tickets_t i = 0; i < ticket_count; i++) {
                 generate_new_ticket();
@@ -249,6 +356,10 @@ public:
 
     vector<string> get_tickets() {
         return tickets;
+    }
+
+    size_t get_count() {
+        return tickets.size();
     }
 };
 
@@ -295,13 +406,28 @@ public:
     }
 };
 
-class Reservations {
+class Reservation {
+private:
+    id_t event_id;
+    string cookie;
+    timeout_t expiration_time;
+    Tickets tickets;
+    bool is_read;
+public:
+    Reservation(timeout_t timeout):
+        is_read(false),
+        expiration_time(time(nullptr) + timeout) {
+
+    }
+};
+
+class EventsServer {
 public:
     using reservation_t = struct reservation {
-        tickets_t tickets;
         id_t event_id;
         string cookie;
         timeout_t expiration_time;
+        Tickets tickets;
         bool is_read;
     };
 private:
@@ -317,16 +443,15 @@ private:
     id_t next_id;
     queue<deadline_t> deadlines;
 
-
     void update_reservations() {
         time_t current_time = time(nullptr);
         while (!deadlines.empty()) {
-            if ((long int)deadlines.front().timeout >= current_time) {
+            if ((time_t)deadlines.front().timeout < current_time) {
                 deadline d = deadlines.front();
                 deadlines.pop();
                 if (!reservations[d.reservation_id].is_read) {
                     events.add_tickets(reservations[d.reservation_id].event_id,
-                                       reservations[d.reservation_id].tickets);
+                           reservations[d.reservation_id].tickets.get_count());
                     reservations[d.reservation_id].cookie = generate_cookie();
                 }
             }
@@ -340,16 +465,6 @@ private:
         return next_id++;
     }
 
-    void put_reservation(reservation_t &reservation, id_t id) {
-        assert(id <= reservations.size());
-        if (id == reservations.size()) {
-            reservations.push_back(reservation);
-        }
-        else {
-            reservations[id] = reservation;
-        }
-    }
-
     static string generate_cookie() {
         string s;
         for (int i = 0; i < COOKIE_B; i++) {
@@ -358,7 +473,7 @@ private:
         return s;
     }
 public:
-    Reservations(timeout_t _timeout, Events &_events):
+    EventsServer(timeout_t _timeout, Events &_events):
         timeout(_timeout), events(_events), next_id(0) {}
 
     Events get_events() {
@@ -366,7 +481,7 @@ public:
     }
 
     optional<pair<id_t, reservation_t>>
-            book(id_t event_id, tickets_t ticket_count) {
+            book_event(id_t event_id, tickets_t ticket_count) {
         update_reservations();
         if (event_id >= events.size() || ticket_count == 0 ||
             *events.get_tickets(event_id) < ticket_count ||
@@ -376,17 +491,19 @@ public:
 
         id_t reservation_id = get_new_reservation_id();
         reservation_t reservation;
-        reservation.tickets = ticket_count;
+        reservation.tickets = Tickets(reservation_id, ticket_count);
         reservation.event_id = event_id;
         reservation.cookie = generate_cookie();
         reservation.expiration_time = time(nullptr) + timeout;
+        reservation.is_read = false;
 
         deadline_t deadline;
         deadline.timeout = reservation.expiration_time;
         deadline.reservation_id = reservation_id;
 
         deadlines.push(deadline);
-        put_reservation(reservation, reservation_id);
+        reservations.push_back(reservation);
+
         events.remove_tickets(event_id, ticket_count);
 
         return make_pair(reservation_id + MIN_RESERVATION_ID, reservation);
@@ -395,33 +512,26 @@ public:
     optional<Tickets> get_tickets(id_t reservation_id, string &cookie) {
         reservation_id -= MIN_RESERVATION_ID;
         update_reservations();
-        reservations[reservation_id].is_read = true;
+
         if (reservation_id >= reservations.size() ||
-            reservations[reservation_id].cookie == cookie) {
+            reservations[reservation_id].cookie != cookie) {
             return nullopt;
         }
 
-        if (reservations[reservation_id].cookie == cookie) {
-            reservations[reservation_id].cookie = "";
-            Tickets tickets(reservation_id,
-                            reservations[reservation_id].tickets);
-            return Tickets(reservation_id,
-                           reservations[reservation_id].tickets);
-        }
-
-        return nullopt;
-    }
-
-    timeout_t get_timeout() const {
-        return timeout;
+        reservations[reservation_id].is_read = true;
+        return reservations[reservation_id].tickets;
     }
 };
 
 unsigned long read_number(char *string) {
     errno = 0;
-    unsigned long number = strtoul(string, nullptr, 10);
+    char* ptr;
+    unsigned long number = strtoul(string, &ptr, 10);
     if (errno != 0) {
         PRINT_ERRNO();
+    }
+    if (*ptr != '\0') {
+        fatal(WRONG_USAGE);
     }
     return number;
 }
@@ -437,19 +547,18 @@ uint16_t read_port(char *string) {
 
 uint32_t read_timeout(char *string) {
     uint32_t timeout = read_number(string);
-    if (timeout > TIMEOUT_MAX) {
+    if (timeout > TIMEOUT_MAX || timeout < TIMEOUT_MIN) {
         fatal("%ul is not a valid timout", timeout);
     }
 
     return timeout;
 }
 
-int find_flag(const char* flag, char *argv[], int argc, int *flag_counter) {
-    int flag_position = 0;
+int find_flag(const char* flag, char *argv[], int argc) {
+    int flag_position = -1;
     for (int i = 1; i < argc; i++) {
         if (strcmp(flag, argv[i]) == 0) {
             flag_position = i;
-            (*flag_counter)++;
         }
     }
 
@@ -457,10 +566,9 @@ int find_flag(const char* flag, char *argv[], int argc, int *flag_counter) {
 }
 
 int get_file(char *argv[], int argc) {
-    int count_f = 0;
-    int flag_position = find_flag("-f", argv, argc, &count_f);
+    int flag_position = find_flag("-f", argv, argc);
 
-    if (count_f == 0 || count_f > 1 || flag_position + 1 == argc) {
+    if (flag_position + 1 == argc || flag_position == -1) {
         fatal(WRONG_USAGE);
     }
 
@@ -468,26 +576,25 @@ int get_file(char *argv[], int argc) {
 }
 
 uint16_t get_port(char *argv[], int argc) {
-    int count_p = 0;
-    int flag_position = find_flag("-p", argv, argc, &count_p);
+    int flag_position = find_flag("-p", argv, argc);
 
-    if (count_p == 0)
+    if (flag_position == -1)
         return DEFAULT_PORT;
 
-    if (count_p > 1 || flag_position + 1 == argc)
+    if (flag_position + 1 == argc)
         fatal(WRONG_USAGE);
 
     return read_port(argv[flag_position + 1]);
 }
 
 uint32_t get_timeout(char *argv[], int argc) {
-    int count_t = 0;
-    int flag_position = find_flag("-t", argv, argc, &count_t);
-    if (count_t > 1 || flag_position + 1 == argc)
-        fatal(WRONG_USAGE);
+    int flag_position = find_flag("-t", argv, argc);
 
-    if (count_t == 0)
+    if (flag_position == -1)
         return DEFAULT_TIMEOUT;
+
+    if (flag_position + 1 == argc)
+        fatal(WRONG_USAGE);
 
     return read_timeout(argv[flag_position + 1]);
 }
@@ -502,19 +609,21 @@ void check_correctness(char *argv[], int argc) {
         fatal(WRONG_USAGE);
     }
 
-    for (int i = 1; i < argc; i += 2) {
-        if (!is_flag(argv[i])) {
+    for (int i = 1; i < argc; ++i) {
+        // on odd positions must be flags and on even not
+        if (((i & 1) && !is_flag(argv[i])) || (!(i & 1) && is_flag(argv[i]))) {
             fatal(WRONG_USAGE);
         }
     }
 }
 
 void send_events(CommunicatHandler &handler, Events events) {
-    if (handler.get_length() > GET_EVENTS_SIZE) return;
+    if (handler.get_length() != GET_EVENTS_SIZE) return;
 
     handler.start_writing();
     uint8_t message_id = EVENTS;
-    size_t number_of_bytes = handler.write_bytes(&message_id, MESSAGE_ID_B)
+    size_t number_of_bytes = handler.write_bytes(&message_id,
+                                                 MESSAGE_ID_B)
                                 ->get_written_buffer_length();
 
     for (id_t event_id = 0; event_id < events.size(); event_id++) {
@@ -522,12 +631,12 @@ void send_events(CommunicatHandler &handler, Events events) {
             events.get_description(event_id)->size() > BUFFER_SIZE) {
             continue;
         }
-        uint32_t test = event_id + 1;
+
         uint8_t description_length = events.get_description(event_id)->size();
-        number_of_bytes = handler.write_bytes(&test, EVENT_ID_B)
+        number_of_bytes = handler.write_bytes(&event_id, EVENT_ID_B)
             ->write_bytes(events.get_tickets(event_id), TICKET_COUNT_B)
             ->write_bytes(&description_length, DESCRIPTION_LEN_B)
-            ->write_bytes(events.get_description(event_id), description_length)
+            ->write_bytes(events.get_description(event_id)->c_str(), description_length)
             ->get_written_buffer_length();
     }
 
@@ -535,8 +644,8 @@ void send_events(CommunicatHandler &handler, Events events) {
 }
 
 void make_reservation(CommunicatHandler &handler,
-                      Reservations &reservations) {
-    if (handler.get_length() > GET_RESERVATION_SIZE) return;
+                      EventsServer &reservations) {
+    if (handler.get_length() != GET_RESERVATION_SIZE) return;
 
     id_t event_id;
     tickets_t tickets_count;
@@ -544,12 +653,13 @@ void make_reservation(CommunicatHandler &handler,
     handler.read_bytes(&tickets_count, TICKET_COUNT_B);
 
     handler.start_writing();
-    if (auto res = reservations.book(event_id, tickets_count)) {
+    if (auto res = reservations.book_event(event_id, tickets_count)) {
         uint8_t message_id = RESERVATION;
+        tickets_t ticketCount = res->second.tickets.get_count();
         handler.write_bytes(&message_id, MESSAGE_ID_B)
             ->write_bytes(&(res->first), RESERVATION_ID_B)
             ->write_bytes(&(res->second.event_id), EVENT_ID_B)
-            ->write_bytes(&(res->second.tickets), TICKET_COUNT_B)
+            ->write_bytes(&ticketCount, TICKET_COUNT_B)
             ->write_bytes(res->second.cookie.c_str(), COOKIE_B)
             ->write_bytes(&(res->second.expiration_time), EXPIRATION_TIME_B)
             ->send_communicat();
@@ -562,21 +672,37 @@ void make_reservation(CommunicatHandler &handler,
     }
 }
 
-void send_tickets(CommunicatHandler &handler, Reservations &reservations) {
-    if (handler.get_length() > GET_TICKETS_SIZE) return;
+string create_string(char *str) {
+    string s;
+    for (int i = 0; i < COOKIE_B; i++) {
+        s += str[i];
+    }
+
+    return s;
+}
+
+/*
+    std::ofstream myfile;
+    myfile.open ("example.txt");
+    myfile << handler.get_length();
+    myfile.close();
+ */
+
+void send_tickets(CommunicatHandler &handler, EventsServer &reservations) {
+    if (handler.get_length() != GET_TICKETS_SIZE) return;
 
     id_t reservation_id;
     char cookie[COOKIE_B];
     handler.read_bytes(&reservation_id, RESERVATION_ID_B);
     handler.read_bytes(cookie, COOKIE_B);
-    string cookie_s(cookie);
+    string cookie_s = create_string(cookie);
     handler.start_writing();
 
     if (auto tickets = reservations.get_tickets(reservation_id, cookie_s)) {
         uint8_t message_id = TICKETS;
         size_t tickets_count = (*tickets).get_tickets().size();
         handler.write_bytes(&message_id, MESSAGE_ID_B)
-            ->write_bytes((*tickets).get_reservation_id(), RESERVATION_ID_B)
+            ->write_bytes(&reservation_id, RESERVATION_ID_B)
             ->write_bytes(&tickets_count, TICKET_COUNT_B);
         vector<string> tickets_ids = (*tickets).get_tickets();
         for (auto & tickets_id : tickets_ids) {
@@ -593,7 +719,7 @@ void send_tickets(CommunicatHandler &handler, Reservations &reservations) {
 }
 
 void handle_next_request(CommunicatHandler &handler,
-                         Reservations &reservations) {
+                         EventsServer &reservations) {
     handler.load_communicat();
     uint8_t message_id;
     handler.read_bytes(&message_id, sizeof(message_id));
@@ -614,7 +740,8 @@ void handle_next_request(CommunicatHandler &handler,
 
 int main(int argc, char *argv[]) {
     srand(time(nullptr));
-    if (argc < 2 || argc > 6) {
+
+    if (argc <= 2) {
         fatal("usage: %s -f <file> -p <port> -t <timeout>", argv[0]);
     }
 
@@ -623,11 +750,9 @@ int main(int argc, char *argv[]) {
     uint16_t port = get_port(argv, argc);
     uint32_t timeout = get_timeout(argv, argc);
 
-    std::cout << "Server: " << port << " " << timeout << std::endl;
-
     ServerHandler server_handler(port);
     Events events(argv[file_position]);
-    Reservations reservations(timeout, events);
+    EventsServer reservations(timeout, events);
     CommunicatHandler handler(server_handler);
 
     while (true) {
